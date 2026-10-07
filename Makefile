@@ -1,9 +1,3 @@
-# Convenience wrapper around CMake.
-#   make build             configure (if needed) and build everything into build/
-#   make test              build and run every test via ctest
-#   make test T=<regex>    run only tests whose name matches, e.g. make test T=ORSet
-#   make clean             delete the build directory
-
 .PHONY: build configure test clean
 
 configure:
