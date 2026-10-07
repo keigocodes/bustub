@@ -1,0 +1,31 @@
+# Build output
+build/
+build-*/
+cmake-build-*/
+compile_commands.json
+.cache/
+
+# Compiled artifacts
+*.o
+*.a
+*.so
+*.out
+
+# BusTub runtime files
+*.db
+*.log
+*.bpm
+
+# Submission zips (make submit-p*) and generated Gradescope file
+*.zip
+GRADESCOPE.md
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# clangd
+.clangd
