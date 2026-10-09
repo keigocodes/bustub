@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "common/channel.h"
+#include "common/macros.h"
 #include "storage/disk/disk_manager.h"
 
 namespace bustub {
@@ -52,12 +53,38 @@ struct DiskRequest {
  */
 class DiskScheduler {
  public:
-  explicit DiskScheduler(DiskManager *disk_manager);
-  ~DiskScheduler();
+  explicit DiskScheduler(DiskManager *disk_manager) : disk_manager_(disk_manager) {
+    UNIMPLEMENTED("TODO(P1): Add implementation.");
+    // Spawn the background thread
+    background_thread_.emplace([&] { StartWorkerThread(); });
+  }
 
-  void Schedule(std::vector<DiskRequest> &requests);
+  ~DiskScheduler() {
+    // Put a `std::nullopt` in the queue to signal to exit the loop
+    request_queue_.Put(std::nullopt);
+    if (background_thread_.has_value()) {
+      background_thread_->join();
+    }
+  }
 
-  void StartWorkerThread();
+  /**
+   * TODO(P1): Add implementation
+   *
+   * @brief Schedules a request for the DiskManager to execute.
+   *
+   * @param requests The requests to be scheduled.
+   */
+  void Schedule(std::vector<DiskRequest> &requests) {}
+
+  /**
+   * TODO(P1): Add implementation
+   *
+   * @brief Background worker thread function that processes scheduled requests.
+   *
+   * The background thread needs to process requests while the DiskScheduler exists, i.e., this function should not
+   * return until ~DiskScheduler() is called. At that point you need to make sure that the function does return.
+   */
+  void StartWorkerThread() {}
 
   using DiskSchedulerPromise = std::promise<bool>;
 
