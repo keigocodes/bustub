@@ -12,9 +12,9 @@
 
 #pragma once
 
-#include <future>  // NOLINT
+#include <future> // NOLINT
 #include <optional>
-#include <thread>  // NOLINT
+#include <thread> // NOLINT
 #include <vector>
 
 #include "common/channel.h"
@@ -47,14 +47,14 @@ struct DiskRequest {
 /**
  * @brief The DiskScheduler schedules disk read and write operations.
  *
- * A request is scheduled by calling DiskScheduler::Schedule() with an appropriate DiskRequest object. The scheduler
- * maintains a background worker thread that processes the scheduled requests using the disk manager. The background
- * thread is created in the DiskScheduler constructor and joined in its destructor.
+ * A request is scheduled by calling DiskScheduler::Schedule() with an appropriate DiskRequest
+ * object. The scheduler maintains a background worker thread that processes the scheduled requests
+ * using the disk manager. The background thread is created in the DiskScheduler constructor and
+ * joined in its destructor.
  */
 class DiskScheduler {
- public:
+public:
   explicit DiskScheduler(DiskManager *disk_manager) : disk_manager_(disk_manager) {
-    UNIMPLEMENTED("TODO(P1): Add implementation.");
     // Spawn the background thread
     background_thread_.emplace([&] { StartWorkerThread(); });
   }
@@ -74,23 +74,41 @@ class DiskScheduler {
    *
    * @param requests The requests to be scheduled.
    */
-  void Schedule(std::vector<DiskRequest> &requests) {}
+  void Schedule(std::vector<DiskRequest> &requests) {
+    for (auto &req : requests) {
+      request_queue_.Put(std::move(req));
+    }
+  }
 
   /**
    * TODO(P1): Add implementation
    *
    * @brief Background worker thread function that processes scheduled requests.
    *
-   * The background thread needs to process requests while the DiskScheduler exists, i.e., this function should not
-   * return until ~DiskScheduler() is called. At that point you need to make sure that the function does return.
+   * The background thread needs to process requests while the DiskScheduler exists, i.e., this
+   * function should not return until ~DiskScheduler() is called. At that point you need to make
+   * sure that the function does return.
    */
-  void StartWorkerThread() {}
+  void StartWorkerThread() {
+    while (true) {
+      auto req = request_queue_.Get();
+      if (!req.has_value())
+        return;
+
+      if (req->is_write_)
+        disk_manager_->WritePage(req->page_id_, req->data_);
+      else
+        disk_manager_->ReadPage(req->page_id_, req->data_);
+
+      req->callback_.set_value(true);
+    }
+  }
 
   using DiskSchedulerPromise = std::promise<bool>;
 
   /**
-   * @brief Create a Promise object. If you want to implement your own version of promise, you can change this function
-   * so that our test cases can use your promise implementation.
+   * @brief Create a Promise object. If you want to implement your own version of promise, you can
+   * change this function so that our test cases can use your promise implementation.
    *
    * @return std::promise<bool>
    */
@@ -99,19 +117,21 @@ class DiskScheduler {
   /**
    * @brief Deallocates a page on disk.
    *
-   * Note: You should look at the documentation for `DeletePage` in `BufferPoolManager` before using this method.
+   * Note: You should look at the documentation for `DeletePage` in `BufferPoolManager` before using
+   * this method.
    *
    * @param page_id The page ID of the page to deallocate from disk.
    */
   void DeallocatePage(page_id_t page_id) { disk_manager_->DeletePage(page_id); }
 
- private:
+private:
   /** Pointer to the disk manager. */
   DiskManager *disk_manager_ __attribute__((__unused__));
-  /** A shared queue to concurrently schedule and process requests. When the DiskScheduler's destructor is called,
-   * `std::nullopt` is put into the queue to signal to the background thread to stop execution. */
+  /** A shared queue to concurrently schedule and process requests. When the DiskScheduler's
+   * destructor is called, `std::nullopt` is put into the queue to signal to the background thread
+   * to stop execution. */
   Channel<std::optional<DiskRequest>> request_queue_;
   /** The background thread responsible for issuing scheduled requests to the disk manager. */
   std::optional<std::thread> background_thread_;
 };
-}  // namespace bustub
+} // namespace bustub
