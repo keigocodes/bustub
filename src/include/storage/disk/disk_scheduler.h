@@ -81,6 +81,23 @@ public:
   }
 
   /**
+   * @brief Schedules a single read or write and blocks until the worker thread has completed it.
+   *
+   * @param is_write Whether the request is a write (`true`) or a read (`false`).
+   * @param page_id The page ID of the page to read from / write to disk.
+   * @param data The buffer to read into / write out of.
+   */
+  void ScheduleAndWait(bool is_write, page_id_t page_id, char *data) {
+    auto promise = CreatePromise();
+    auto future = promise.get_future();
+
+    std::vector<DiskRequest> requests;
+    requests.push_back({is_write, data, page_id, std::move(promise)});
+    Schedule(requests);
+    future.get();
+  }
+
+  /**
    * TODO(P1): Add implementation
    *
    * @brief Background worker thread function that processes scheduled requests.

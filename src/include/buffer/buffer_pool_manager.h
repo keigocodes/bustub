@@ -511,13 +511,7 @@ private:
 
   /** @brief Synchronously reads or writes one page through the disk scheduler. */
   void DoDiskIo(bool is_write, page_id_t page_id, char *data) {
-    auto promise = disk_scheduler_->CreatePromise();
-    auto future = promise.get_future();
-
-    std::vector<DiskRequest> requests;
-    requests.push_back({is_write, data, page_id, std::move(promise)});
-    disk_scheduler_->Schedule(requests);
-    future.get();
+    disk_scheduler_->ScheduleAndWait(is_write, page_id, data);
   }
 
   /** @brief The replacer to find unpinned / candidate pages for eviction. */

@@ -239,7 +239,11 @@ public:
    *
    * TODO(P1): Add implementation.
    */
-  void Flush() { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+  void Flush() {
+    BUSTUB_ENSURE(is_valid_, "tried to flush an invalid read guard");
+    disk_scheduler_->ScheduleAndWait(true, page_id_, frame_->GetDataMut());
+    frame_->is_dirty_ = false;
+  }
 
   /**
    * @brief Manually drops a valid `ReadPageGuard`'s data. If this guard is invalid, this function
@@ -490,7 +494,11 @@ public:
    *
    * TODO(P1): Add implementation.
    */
-  void Flush() { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+  void Flush() {
+    BUSTUB_ENSURE(is_valid_, "tried to flush an invalid write guard");
+    disk_scheduler_->ScheduleAndWait(true, page_id_, frame_->GetDataMut());
+    frame_->is_dirty_ = false;
+  }
 
   /**
    * @brief Manually drops a valid `WritePageGuard`'s data. If this guard is invalid, this function
