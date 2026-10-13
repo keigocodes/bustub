@@ -413,7 +413,11 @@ public:
    *
    * @param that The other page guard.
    */
-  WritePageGuard(WritePageGuard &&that) noexcept {}
+  WritePageGuard(WritePageGuard &&that) noexcept
+      : page_id_(that.page_id_), frame_(std::move(that.frame_)),
+        replacer_(std::move(that.replacer_)), bpm_latch_(std::move(that.bpm_latch_)),
+        disk_scheduler_(std::move(that.disk_scheduler_)),
+        is_valid_(std::exchange(that.is_valid_, false)) {}
 
   /**
    * @brief The move assignment operator for `WritePageGuard`.
@@ -433,7 +437,18 @@ public:
    * @param that The other page guard.
    * @return WritePageGuard& The newly valid `WritePageGuard`.
    */
-  auto operator=(WritePageGuard &&that) noexcept -> WritePageGuard & { return *this; }
+  auto operator=(WritePageGuard &&that) noexcept -> WritePageGuard & {
+    if (this != &that) {
+      Drop();
+      page_id_ = that.page_id_;
+      frame_ = std::move(that.frame_);
+      replacer_ = std::move(that.replacer_);
+      bpm_latch_ = std::move(that.bpm_latch_);
+      disk_scheduler_ = std::move(that.disk_scheduler_);
+      is_valid_ = std::exchange(that.is_valid_, false);
+    }
+    return *this;
+  }
 
   /** @brief Gets the page ID of the page this guard is protecting. */
   auto GetPageId() const -> page_id_t {
@@ -489,7 +504,31 @@ public:
    *
    * TODO(P1): Add implementation.
    */
-  void Drop() { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+  void Drop() {
+    if (!is_valid_)
+      return;
+
+    is_valid_ = false;
+
+    // Release the page latch before taking the BPM latch. Other code takes the BPM latch and then a
+    // frame latch, so holding them in the opposite order here could deadlock. The pin we still hold
+    // keeps the frame from being evicted in between.
+    frame_->rwlatch_.unlock();
+
+    // Unpin under the BPM latch, so that a concurrent re-pin can't slip in between the count
+    // hitting zero and marking the frame evictable.
+    {
+      std::scoped_lock latch(*bpm_latch_);
+      if (frame_->pin_count_.fetch_sub(1) == 1) {
+        replacer_->SetEvictable(frame_->frame_id_, true);
+      }
+    }
+
+    frame_.reset();
+    replacer_.reset();
+    bpm_latch_.reset();
+    disk_scheduler_.reset();
+  }
 
   /** @brief The destructor for `WritePageGuard`. This destructor simply calls `Drop()`. */
   ~WritePageGuard() { Drop(); }
@@ -514,7 +553,8 @@ private:
                           std::shared_ptr<DiskScheduler> disk_scheduler)
       : page_id_(page_id), frame_(std::move(frame)), replacer_(std::move(replacer)),
         bpm_latch_(std::move(bpm_latch)), disk_scheduler_(std::move(disk_scheduler)) {
-    UNIMPLEMENTED("TODO(P1): Add implementation.");
+    frame_->rwlatch_.lock();
+    is_valid_ = true;
   }
 
   /** @brief The page ID of the page we are guarding. */
