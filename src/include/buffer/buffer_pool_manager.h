@@ -144,7 +144,25 @@ public:
    * @return `false` if the page exists but could not be deleted, `true` if the page didn't exist or
    * deletion succeeded.
    */
-  auto DeletePage(page_id_t page_id) -> bool { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+  auto DeletePage(page_id_t page_id) -> bool {
+    std::scoped_lock lock(*state.bpm_latch_);
+
+    const auto frame_id = FindResidentFrame(page_id);
+    if (frame_id.has_value()) {
+      const auto &frame = state.frames_[*frame_id];
+      if (frame->pin_count_ > 0)
+        return false;
+
+      // No write-back: the page is being deleted, so its contents don't matter.
+      state.page_table_.erase(page_id);
+      replacer_->Remove(*frame_id);
+      frame->Reset();
+      state.free_frames_.push_back(*frame_id);
+    }
+
+    disk_scheduler_->DeallocatePage(page_id);
+    return true;
+  }
   /**
    * @brief Acquires an optional write-locked guard over a page of data. The user can specify an
    * `AccessType` if needed.
@@ -323,7 +341,14 @@ public:
    * @return `false` if the page could not be found in the page table; otherwise, `true`.
    */
   auto FlushPageUnsafe(page_id_t page_id) -> bool {
-    UNIMPLEMENTED("TODO(P1): Add implementation.");
+    std::scoped_lock lock(*state.bpm_latch_);
+
+    const auto frame_id = FindResidentFrame(page_id);
+    if (!frame_id.has_value())
+      return false;
+
+    WriteBackUnlatched(page_id, *frame_id);
+    return true;
   }
   /**
    * @brief Flushes a page's data out to disk safely.
@@ -345,7 +370,25 @@ public:
    * @param page_id The page ID of the page to be flushed.
    * @return `false` if the page could not be found in the page table; otherwise, `true`.
    */
-  auto FlushPage(page_id_t page_id) -> bool { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+  auto FlushPage(page_id_t page_id) -> bool {
+    std::unique_lock lock(*state.bpm_latch_);
+
+    const auto frame_id = FindResidentFrame(page_id);
+    if (!frame_id.has_value())
+      return false;
+
+    // Pin without recording an access, so flushing doesn't affect LRU-K eviction order.
+    const auto &frame = state.frames_[*frame_id];
+    frame->pin_count_++;
+    replacer_->SetEvictable(*frame_id, false);
+
+    // Same rule as CheckedReadPage: never wait on a page latch while holding the BPM latch.
+    lock.unlock();
+    ReadPageGuard guard(page_id, frame, replacer_, state.bpm_latch_, disk_scheduler_);
+    if (guard.IsDirty())
+      guard.Flush();
+    return true;
+  }
   /**
    * @brief Flushes all page data that is in memory to disk unsafely.
    *
@@ -360,7 +403,11 @@ public:
    *
    * TODO(P1): Add implementation
    */
-  void FlushAllPagesUnsafe() { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+  void FlushAllPagesUnsafe() {
+    std::scoped_lock lock(*state.bpm_latch_);
+    for (const auto &[page_id, frame_id] : state.page_table_)
+      WriteBackUnlatched(page_id, frame_id);
+  }
   /**
    * @brief Flushes all page data that is in memory to disk safely.
    *
@@ -375,7 +422,21 @@ public:
    *
    * TODO(P1): Add implementation
    */
-  void FlushAllPages() { UNIMPLEMENTED("TODO(P1): Add implementation."); }
+  void FlushAllPages() {
+    // Snapshot the resident pages, then flush each one through FlushPage, which takes the page
+    // latch without holding the BPM latch. A page evicted in the meantime was already written back
+    // by the eviction, so FlushPage returning false for it is fine.
+    std::vector<page_id_t> page_ids;
+    {
+      std::scoped_lock lock(*state.bpm_latch_);
+      page_ids.reserve(state.page_table_.size());
+      for (const auto &[page_id, frame_id] : state.page_table_)
+        page_ids.push_back(page_id);
+    }
+
+    for (const auto page_id : page_ids)
+      FlushPage(page_id);
+  }
   /**
    * @brief Retrieves the pin count of a page. If the page does not exist in memory, return
    * `std::nullopt`.
@@ -415,34 +476,6 @@ public:
   }
 
 private:
-  /** @brief The number of frames in the buffer pool. */
-  const size_t num_frames_;
-
-  /** @brief The next page ID to be allocated.  */
-  std::atomic<page_id_t> next_page_id_;
-
-  /**
-   * @brief The latch protecting the buffer pool's inner data structures.
-   *
-   * TODO(P1) We recommend replacing this comment with details about what this latch actually
-   * protects.
-   */
-  struct State {
-    std::shared_ptr<std::mutex> bpm_latch_{std::make_shared<std::mutex>()};
-
-    /** @brief The frame headers of the frames that this buffer pool manages. */
-    std::vector<std::shared_ptr<FrameHeader>> frames_;
-
-    /** @brief The page table that keeps track of the mapping between pages and buffer pool frames.
-     */
-    std::unordered_map<page_id_t, frame_id_t> page_table_;
-
-    /** @brief A list of free frames that do not hold any page's data. */
-    std::list<frame_id_t> free_frames_;
-  };
-
-  State state;
-
   // The helpers below must be called with the BPM latch held.
 
   /** @brief Returns the frame holding `page_id`, or `std::nullopt` if the page isn't in memory. */
@@ -509,10 +542,50 @@ private:
     state.page_table_[page_id] = frame_id;
   }
 
+  /** @brief Writes back the frame's page if it's dirty, without taking the page latch. */
+  void WriteBackUnlatched(page_id_t page_id, frame_id_t frame_id) {
+    const auto &frame = state.frames_[frame_id];
+    if (!frame->is_dirty_)
+      return;
+
+    // Clear the bit before writing, not after. We don't hold the page latch, so a writer may
+    // modify the page mid-write; clearing first lets that writer's change mark it dirty again.
+    frame->is_dirty_ = false;
+    DoDiskIo(true, page_id, frame->GetDataMut());
+  }
+
   /** @brief Synchronously reads or writes one page through the disk scheduler. */
   void DoDiskIo(bool is_write, page_id_t page_id, char *data) {
     disk_scheduler_->ScheduleAndWait(is_write, page_id, data);
   }
+
+  /** @brief The number of frames in the buffer pool. */
+  const size_t num_frames_;
+
+  /** @brief The next page ID to be allocated.  */
+  std::atomic<page_id_t> next_page_id_;
+
+  /**
+   * @brief The latch protecting the buffer pool's inner data structures.
+   *
+   * TODO(P1) We recommend replacing this comment with details about what this latch actually
+   * protects.
+   */
+  struct State {
+    std::shared_ptr<std::mutex> bpm_latch_{std::make_shared<std::mutex>()};
+
+    /** @brief The frame headers of the frames that this buffer pool manages. */
+    std::vector<std::shared_ptr<FrameHeader>> frames_;
+
+    /** @brief The page table that keeps track of the mapping between pages and buffer pool frames.
+     */
+    std::unordered_map<page_id_t, frame_id_t> page_table_;
+
+    /** @brief A list of free frames that do not hold any page's data. */
+    std::list<frame_id_t> free_frames_;
+  };
+
+  State state;
 
   /** @brief The replacer to find unpinned / candidate pages for eviction. */
   std::shared_ptr<LRUKReplacer> replacer_;
